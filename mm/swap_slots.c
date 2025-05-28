@@ -90,6 +90,12 @@ void reenable_swap_slots_cache_unlock(void)
 	mutex_unlock(&swap_slots_cache_enable_mutex);
 }
 
+bool is_swap_slot_cache_enabled(void)
+{
+	return swap_slot_cache_enabled;
+}
+EXPORT_SYMBOL_GPL(is_swap_slot_cache_enabled);
+
 static bool check_cache_active(void)
 {
 	long pages;
@@ -278,9 +284,17 @@ static int refill_swap_slots_cache(struct swap_slots_cache *cache)
 int free_swap_slot(swp_entry_t entry)
 {
 	struct swap_slots_cache *cache;
+	struct swap_info_struct *si;
 
+	si = swp_swap_info(entry);
 	cache = raw_cpu_ptr(&swp_slots);
-	if (likely(use_swap_slot_cache && cache->slots_ret)) {
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/* othereise, basepages can get hugepages' zRAM */
+	if (is_thp_swap(swp_swap_info(entry)))
+		goto direct_free;
+#endif
+	if ((si && !(si->flags & SWP_SYNCHRONOUS_IO)) &&
+				use_swap_slot_cache && cache->slots_ret) {
 		spin_lock_irq(&cache->free_lock);
 		/* Swap slots cache may be deactivated before acquiring lock */
 		if (!use_swap_slot_cache || !cache->slots_ret) {
@@ -316,7 +330,13 @@ swp_entry_t get_swap_page(struct page *page)
 
 	if (PageTransHuge(page)) {
 		if (IS_ENABLED(CONFIG_THP_SWAP))
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			get_swap_pages(1, &entry, hpage_nr_pages(page));
+		/* TODO remove in the future */
+		CHP_BUG_ON(entry.val && !is_thp_swap(swp_swap_info(entry)));
+#else
 			get_swap_pages(1, &entry, HPAGE_PMD_NR);
+#endif
 		goto out;
 	}
 
@@ -331,7 +351,12 @@ swp_entry_t get_swap_page(struct page *page)
 	 */
 	cache = raw_cpu_ptr(&swp_slots);
 
+#if defined(CONFIG_NANDSWAP)
+	if (likely(check_cache_active() && cache->slots) &&
+		!current_is_nswapoutd()) {
+#else
 	if (likely(check_cache_active() && cache->slots)) {
+#endif
 		mutex_lock(&cache->alloc_lock);
 		if (cache->slots) {
 repeat:

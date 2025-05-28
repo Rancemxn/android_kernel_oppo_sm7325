@@ -45,6 +45,18 @@ struct vm_area_struct;
 #define ___GFP_NOLOCKDEP	0
 #endif
 #define ___GFP_CMA		0x1000000u
+#ifdef CONFIG_LIMIT_MOVABLE_ZONE_ALLOC
+#define ___GFP_OFFLINABLE	0x2000000u
+#ifdef CONFIG_OPLUS_SENSITIVE_MEM_ALLOC_OPT
+#define ___GFP_MEMPOOL	0x4000000u
+#endif
+#else
+#define ___GFP_OFFLINABLE	0
+#ifdef CONFIG_OPLUS_SENSITIVE_MEM_ALLOC_OPT
+#define ___GFP_MEMPOOL	0x2000000u
+#endif
+#endif
+
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -59,7 +71,11 @@ struct vm_area_struct;
 #define __GFP_DMA32	((__force gfp_t)___GFP_DMA32)
 #define __GFP_MOVABLE	((__force gfp_t)___GFP_MOVABLE)  /* ZONE_MOVABLE allowed */
 #define __GFP_CMA	((__force gfp_t)___GFP_CMA)
+#define __GFP_OFFLINABLE	((__force gfp_t)___GFP_OFFLINABLE)
 #define GFP_ZONEMASK	(__GFP_DMA|__GFP_HIGHMEM|__GFP_DMA32|__GFP_MOVABLE)
+#ifdef CONFIG_OPLUS_SENSITIVE_MEM_ALLOC_OPT
+#define __GFP_MEMPOOL	((__force gfp_t)___GFP_MEMPOOL)
+#endif
 
 /**
  * DOC: Page mobility and placement hints
@@ -219,7 +235,8 @@ struct vm_area_struct;
 #define __GFP_NOLOCKDEP ((__force gfp_t)___GFP_NOLOCKDEP)
 
 /* Room for N __GFP_FOO bits */
-#define __GFP_BITS_SHIFT (25)
+#define __GFP_BITS_SHIFT (25 + IS_ENABLED(CONFIG_LIMIT_MOVABLE_ZONE_ALLOC)  + IS_ENABLED(CONFIG_OPLUS_SENSITIVE_MEM_ALLOC_OPT))
+
 #ifdef CONFIG_LOCKDEP
 #define __GFP_BITS_MASK ((__force gfp_t)((1 << __GFP_BITS_SHIFT) - 1))
 #else
@@ -307,7 +324,9 @@ struct vm_area_struct;
 #define GFP_TRANSHUGE_LIGHT	((GFP_HIGHUSER_MOVABLE | __GFP_COMP | \
 			 __GFP_NOMEMALLOC | __GFP_NOWARN) & ~__GFP_RECLAIM)
 #define GFP_TRANSHUGE	(GFP_TRANSHUGE_LIGHT | __GFP_DIRECT_RECLAIM)
-
+#ifdef CONFIG_OPLUS_SENSITIVE_MEM_ALLOC_OPT
+#define GFP_MEMPOOL		__GFP_MEMPOOL
+#endif
 /* Convert GFP flags to their corresponding migrate type */
 #define GFP_MOVABLE_MASK (__GFP_RECLAIMABLE|__GFP_MOVABLE)
 #define GFP_MOVABLE_SHIFT 3
@@ -448,7 +467,14 @@ static inline bool gfpflags_normal_context(const gfp_t gfp_flags)
 static inline enum zone_type gfp_zone(gfp_t flags)
 {
 	enum zone_type z;
-	int bit = (__force int) (flags & GFP_ZONEMASK);
+	int bit;
+
+	if (!IS_ENABLED(CONFIG_HIGHMEM)) {
+		if ((flags & __GFP_MOVABLE) && !(flags & __GFP_OFFLINABLE))
+			flags &= ~__GFP_HIGHMEM;
+	}
+
+	bit = (__force int) (flags & GFP_ZONEMASK);
 
 	z = (GFP_ZONE_TABLE >> (bit * GFP_ZONES_SHIFT)) &
 					 ((1 << GFP_ZONES_SHIFT) - 1);
@@ -501,6 +527,24 @@ static inline struct page *
 __alloc_pages(gfp_t gfp_mask, unsigned int order, int preferred_nid)
 {
 	return __alloc_pages_nodemask(gfp_mask, order, preferred_nid, NULL);
+}
+
+unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
+				nodemask_t *nodemask, int nr_pages,
+				struct list_head *page_list,
+				struct page **page_array);
+
+/* Bulk allocate order-0 pages */
+static inline unsigned long
+alloc_pages_bulk_list(gfp_t gfp, unsigned long nr_pages, struct list_head *list)
+{
+	return __alloc_pages_bulk(gfp, numa_mem_id(), NULL, nr_pages, list, NULL);
+}
+
+static inline unsigned long
+alloc_pages_bulk_array(gfp_t gfp, unsigned long nr_pages, struct page **page_array)
+{
+	return __alloc_pages_bulk(gfp, numa_mem_id(), NULL, nr_pages, NULL, page_array);
 }
 
 /*
@@ -574,6 +618,7 @@ extern void __free_pages(struct page *page, unsigned int order);
 extern void free_pages(unsigned long addr, unsigned int order);
 extern void free_unref_page(struct page *page);
 extern void free_unref_page_list(struct list_head *list);
+extern bool free_unref_page_prepare2(struct page *page,unsigned int order, unsigned long pfn);
 
 struct page_frag_cache;
 extern void __page_frag_cache_drain(struct page *page, unsigned int count);

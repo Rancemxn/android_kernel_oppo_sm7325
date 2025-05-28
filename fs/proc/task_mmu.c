@@ -19,6 +19,9 @@
 #include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
+#include <linux/mm_inline.h>
+#include <linux/ctype.h>
+#include <linux/sched/signal.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -622,8 +625,43 @@ static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 
 	if (!page)
 		return;
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/* NOTE: pte_cont filters out double map pages */
+	if (ContPteHugePage(page) && pte_cont(*pte)) {
+		if (PageHead(page)) {
+			int i;
+			pte_t *ptep = pte;
+			bool young = false;
+			bool dirty = false;
 
-	smaps_account(mss, page, false, pte_young(*pte), pte_dirty(*pte), locked);
+			if (PageAnon(page))
+				mss->anonymous_thp += HPAGE_CONT_PTE_SIZE;
+			else if (PageSwapBacked(page))
+				mss->shmem_thp += HPAGE_CONT_PTE_SIZE;
+			else if (is_zone_device_page(page))
+				/* pass */;
+			else if (!is_huge_zero_page(page))
+				mss->file_thp += HPAGE_CONT_PTE_SIZE;
+
+			for (i = 0; i < HPAGE_CONT_PTE_NR; i++) {
+				if (!young && pte_young(*ptep))
+				young = true;
+
+				if (!dirty &&  pte_dirty(*ptep))
+				dirty = true;
+
+				if (dirty && young)
+				break;
+
+				ptep++;
+			}
+			smaps_account(mss, page, true, young, dirty, locked);
+		}
+	} else
+#endif
+	{
+		smaps_account(mss, page, false, pte_young(*pte), pte_dirty(*pte), locked);
+	}
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -780,9 +818,7 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 			page = device_private_entry_to_page(swpent);
 	}
 	if (page) {
-		int mapcount = page_mapcount(page);
-
-		if (mapcount >= 2)
+		if (page_mapcount(page) >= 2 || hugetlb_pmd_shared(pte))
 			mss->shared_hugetlb += huge_page_size(hstate_vma(vma));
 		else
 			mss->private_hugetlb += huge_page_size(hstate_vma(vma));
@@ -888,6 +924,28 @@ static int show_smap(struct seq_file *m, void *v)
 
 	smap_gather_stats(vma, &mss);
 
+#ifdef OPLUS_FEATURE_PERFORMANCE
+	if (strcmp(current->comm, "android.bg") == 0) {
+		if ((unsigned long)(mss.pss >> (10 + PSS_SHIFT)) > 0) {
+			seq_printf(m,
+				"Pss:            %8lu kB\n",
+			(	unsigned long)(mss.pss >> (10 + PSS_SHIFT)));
+		}
+		if ((mss.private_clean >> 10) > 0) {
+			seq_printf(m,
+				"Private_Clean:  %8lu kB\n",
+				mss.private_clean >> 10);
+		}
+		if ((mss.private_dirty >> 10) > 0) {
+			seq_printf(m,
+				"Private_Dirty:  %8lu kB\n",
+				mss.private_dirty >> 10);
+		}
+		m_cache_vma(m, vma);
+		return 0;
+	}
+#endif /*OPLUS_FEATURE_PERFORMANCE*/
+
 	show_map_vma(m, vma);
 	if (vma_get_anon_name(vma)) {
 		seq_puts(m, "Name:           ");
@@ -904,6 +962,80 @@ static int show_smap(struct seq_file *m, void *v)
 
 	seq_printf(m, "THPeligible:		%d\n",
 		   transparent_hugepage_enabled(vma));
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && defined(CONFIG_CONT_PTE_HUGEPAGE_DEBUG)
+	if (!strcmp(current->comm, "cat")) {
+		char buf[256];
+		char *p;
+
+		if (!vma_is_anonymous(vma)) {
+			if (mss.file_thp) {
+				p = d_path(&vma->vm_file->f_path, buf, 256);
+				if (!IS_ERR(p)) {
+					seq_printf(m, "GottenContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
+							vma->vm_start, vma->vm_end,
+							vma->vm_flags & VM_READ ? 'r' : '-',
+							vma->vm_flags & VM_WRITE ? 'w' : '-',
+							vma->vm_flags & VM_EXEC ? 'x' : '-',
+							vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
+							vma->vm_pgoff);
+					SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
+					SEQ_PUT_DEC("kB  rss:", mss.resident);
+					SEQ_PUT_DEC("kB  thp_size:", mss.file_thp);
+					seq_printf(m, "kB  %s\n", p);
+				}
+			} else {
+				if (transhuge_cont_pte_vma_suitable(vma, ALIGN_DOWN(vma->vm_start, HPAGE_CONT_PTE_SIZE) + HPAGE_CONT_PTE_SIZE)) {
+					p = d_path(&vma->vm_file->f_path, buf, 256);
+					if (!IS_ERR(p)) {
+						/* filter: vma size >= 128k */
+						if ((vma->vm_end - vma->vm_start) >= (128 << 10)) {
+							seq_printf(m, "MissedContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
+									vma->vm_start, vma->vm_end,
+									vma->vm_flags & VM_READ ? 'r' : '-',
+									vma->vm_flags & VM_WRITE ? 'w' : '-',
+									vma->vm_flags & VM_EXEC ? 'x' : '-',
+									vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
+									vma->vm_pgoff);
+							SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
+							SEQ_PUT_DEC("kB  rss:", mss.resident);
+							SEQ_PUT_DEC("kB  thp_size:", mss.file_thp);
+							seq_printf(m, "kB  %s\n", p);
+						}
+					}
+				}
+			}
+		} else {
+			seq_printf(m, "chp: %d\n", vma_is_chp_anonymous(vma));
+			if (mss.anonymous_thp) {
+				seq_printf(m, "GottenAnonContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
+						vma->vm_start, vma->vm_end,
+						vma->vm_flags & VM_READ ? 'r' : '-',
+						vma->vm_flags & VM_WRITE ? 'w' : '-',
+						vma->vm_flags & VM_EXEC ? 'x' : '-',
+						vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
+						vma->vm_pgoff);
+				SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
+				SEQ_PUT_DEC("kB  rss:", mss.resident);
+				SEQ_PUT_DEC("kB  thp_size:", mss.anonymous_thp);
+				seq_printf(m, "kB \n");
+			} else {
+				if (mss.resident >= HPAGE_CONT_PTE_SIZE) {
+					seq_printf(m, "MissedAnonContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
+							vma->vm_start, vma->vm_end,
+							vma->vm_flags & VM_READ ? 'r' : '-',
+							vma->vm_flags & VM_WRITE ? 'w' : '-',
+							vma->vm_flags & VM_EXEC ? 'x' : '-',
+							vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
+							vma->vm_pgoff);
+					SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
+					SEQ_PUT_DEC("kB  rss:", mss.resident);
+					SEQ_PUT_DEC("kB  thp_size:", mss.anonymous_thp);
+					seq_printf(m, "kB \n");
+				}
+			}
+		}
+	}
+#endif
 
 	if (arch_pkeys_enabled())
 		seq_printf(m, "ProtectionKey:  %8u\n", vma_pkey(vma));
@@ -946,7 +1078,7 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 		last_vma_end = vma->vm_end;
 	}
 
-	show_vma_header_prefix(m, priv->mm->mmap->vm_start,
+	show_vma_header_prefix(m, priv->mm->mmap ? priv->mm->mmap->vm_start : 0,
 			       last_vma_end, 0, 0, 0, 0);
 	seq_pad(m, ' ');
 	seq_puts(m, "[rollup]\n");
@@ -1275,8 +1407,11 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 					goto out_mm;
 				}
 				for (vma = mm->mmap; vma; vma = vma->vm_next) {
-					vma->vm_flags &= ~VM_SOFTDIRTY;
+					vm_write_begin(vma);
+					WRITE_ONCE(vma->vm_flags,
+						vma->vm_flags & ~VM_SOFTDIRTY);
 					vma_set_page_prot(vma);
+					vm_write_end(vma);
 				}
 				downgrade_write(&mm->mmap_sem);
 				break;
@@ -1711,6 +1846,280 @@ const struct file_operations proc_pagemap_operations = {
 	.release	= pagemap_release,
 };
 #endif /* CONFIG_PROC_PAGE_MONITOR */
+
+#ifdef CONFIG_PROCESS_RECLAIM
+/*
+ * Because there may be a mix of hugepages and small pages,
+ * use 2 * SWAP_CLUSTER_MAX conservatively.
+ * FIXME: use CHP_SWAP_CLUSTER_MAX?
+ */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+#define ISOLATED_MAX_PAGES (2 * SWAP_CLUSTER_MAX)
+#else
+#define ISOLATED_MAX_PAGES SWAP_CLUSTER_MAX
+#endif
+static int reclaim_pte_range(pmd_t *pmd, unsigned long addr,
+				unsigned long end, struct mm_walk *walk)
+{
+	struct vm_area_struct *vma = walk->private;
+	pte_t *pte, ptent;
+	spinlock_t *ptl;
+	struct page *page;
+	LIST_HEAD(page_list);
+	int isolated;
+
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
+	split_huge_pmd(vma, pmd, addr);
+#endif
+	if (pmd_trans_unstable(pmd))
+		return 0;
+cont:
+	isolated = 0;
+	pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
+	for (; addr != end; pte++, addr += PAGE_SIZE) {
+		ptent = *pte;
+		if (!pte_present(ptent))
+			continue;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		if (pte_cont(ptent)) {
+			unsigned long next = pte_cont_addr_end(addr, end);
+
+			if (next - addr != HPAGE_CONT_PTE_SIZE) {
+				goto skip;  /* ignore reclaim for partial cont_pte */
+			} else {
+				page = vm_normal_page(vma, addr, ptent);
+				if (!page)
+					goto skip;
+
+				CHP_BUG_ON(!ContPteHugePageHead(page));
+				/*
+				 * do not reclaim page in active lru list
+				 */
+				if (PageActive(page) || PageUnevictable(page))
+					goto skip;
+
+				if (isolate_lru_page(page))
+					goto skip;
+
+				/*
+				 * MADV_FREE clears pte dirty bit and then marks the page
+				 * lazyfree (clear SwapBacked). Inbetween if this lazyfreed page
+				 * is touched by user then it becomes dirty.  PPR in
+				 * shrink_page_list in try_to_unmap finds the page dirty, marks
+				 * it back as PageSwapBacked and skips reclaim. This can cause
+				 * isolated count mismatch.
+				 */
+				if (PageAnon(page) && !PageSwapBacked(page)) {
+					putback_lru_page(page);
+					goto skip;
+				}
+
+				list_add(&page->lru, &page_list);
+#ifdef CONFIG_OPLUS_SYSTEM_KERNEL_QCOM
+				/*
+				 * only qualcomm need inc isolate count; mtk do it itself.
+				 */
+				mod_node_page_state(page_pgdat(page), NR_ISOLATED_ANON + page_is_file_cache(page),
+						compound_nr(page));
+#endif
+				isolated += compound_nr(page);
+				if (isolated >= ISOLATED_MAX_PAGES)
+					break;
+			}
+skip:
+			pte += (next - PAGE_SIZE - addr)/PAGE_SIZE;
+			addr = next - PAGE_SIZE;
+			continue;
+		}
+#endif /* CONFIG_CONT_PTE_HUGEPAGE */
+
+
+		page = vm_normal_page(vma, addr, ptent);
+		if (!page)
+			continue;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		if (PageTransCompound(page)) {
+			pr_err_ratelimited("%s comm:%s pid:%d -> non_cont pte thp reclaim page:%lx "
+					   "PageHead:%d compound_mapcount:%d page_mapcount:%d ref_count:%d \n",
+						__func__, current->comm, current->pid, page, PageHead(page),
+						compound_mapcount(page), page_mapcount(page), page_ref_count(page));
+
+#if CONFIG_PROCESS_RECLAIM_DEBUG
+			atomic64_inc(&perf_stat.process_reclaim_double_map_cnt);
+#endif
+
+			continue;
+		}
+#endif /* CONFIG_CONT_PTE_HUGEPAGE */
+
+
+		if (isolate_lru_page(compound_head(page)))
+			continue;
+
+		/* MADV_FREE clears pte dirty bit and then marks the page
+		 * lazyfree (clear SwapBacked). Inbetween if this lazyfreed page
+		 * is touched by user then it becomes dirty.  PPR in
+		 * shrink_page_list in try_to_unmap finds the page dirty, marks
+		 * it back as PageSwapBacked and skips reclaim. This can cause
+		 * isolated count mismatch.
+		 */
+		if (PageAnon(page) && !PageSwapBacked(page)) {
+			putback_lru_page(page);
+			continue;
+		}
+
+		list_add(&page->lru, &page_list);
+		inc_node_page_state(page, NR_ISOLATED_ANON +
+				page_is_file_cache(page));
+		isolated++;
+		if (isolated >= ISOLATED_MAX_PAGES)
+			break;
+	}
+	pte_unmap_unlock(pte - 1, ptl);
+	reclaim_pages_from_list(&page_list, vma);
+	if (addr != end)
+		goto cont;
+
+	cond_resched();
+	return 0;
+}
+
+enum reclaim_type {
+	RECLAIM_FILE,
+	RECLAIM_ANON,
+	RECLAIM_ALL,
+	RECLAIM_RANGE,
+};
+
+static ssize_t reclaim_write(struct file *file, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	struct task_struct *task;
+	char buffer[200];
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	enum reclaim_type type;
+	char *type_buf;
+	unsigned long start = 0;
+	unsigned long end = 0;
+	const struct mm_walk_ops reclaim_walk_ops = {
+		.pmd_entry = reclaim_pte_range,
+	};
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+
+	if (copy_from_user(buffer, buf, count))
+		return -EFAULT;
+
+	type_buf = strstrip(buffer);
+	if (!strcmp(type_buf, "file"))
+		type = RECLAIM_FILE;
+	else if (!strcmp(type_buf, "anon"))
+		type = RECLAIM_ANON;
+	else if (!strcmp(type_buf, "all"))
+		type = RECLAIM_ALL;
+	else if (isdigit(*type_buf))
+		type = RECLAIM_RANGE;
+	else
+		goto out_err;
+
+	if (type == RECLAIM_RANGE) {
+		char *token;
+		unsigned long long len, len_in, tmp;
+
+		token = strsep(&type_buf, " ");
+		if (!token)
+			goto out_err;
+		tmp = memparse(token, &token);
+		if (tmp & ~PAGE_MASK || tmp > ULONG_MAX)
+			goto out_err;
+		start = tmp;
+
+		token = strsep(&type_buf, " ");
+		if (!token)
+			goto out_err;
+		len_in = memparse(token, &token);
+		len = (len_in + ~PAGE_MASK) & PAGE_MASK;
+		if (len > ULONG_MAX)
+			goto out_err;
+		/*
+		 * Check to see whether len was rounded up from small -ve
+		 * to zero.
+		 */
+		if (len_in && !len)
+			goto out_err;
+
+		end = start + len;
+		if (end < start)
+			goto out_err;
+	}
+
+	task = get_proc_task(file->f_path.dentry->d_inode);
+	if (!task)
+		return -ESRCH;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		goto out;
+
+	down_read(&mm->mmap_sem);
+	if (type == RECLAIM_RANGE) {
+		vma = find_vma(mm, start);
+		while (vma) {
+			if (vma->vm_start > end)
+				break;
+			if (is_vm_hugetlb_page(vma))
+				continue;
+
+			walk_page_range(mm, max(vma->vm_start, start),
+					min(vma->vm_end, end),
+					&reclaim_walk_ops, vma);
+			vma = vma->vm_next;
+
+			if (unlikely(signal_pending(current) &&
+				sigismember(&current->pending.signal, SIGUSR2)))
+				break;
+		}
+	} else {
+		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			if (is_vm_hugetlb_page(vma))
+				continue;
+
+			if (type == RECLAIM_ANON && vma->vm_file)
+				continue;
+
+			if (type == RECLAIM_FILE && !vma->vm_file)
+				continue;
+
+			walk_page_range(mm, vma->vm_start, vma->vm_end,
+					&reclaim_walk_ops, vma);
+
+			if (unlikely(signal_pending(current) &&
+				sigismember(&current->pending.signal, SIGUSR2)))
+				break;
+		}
+	}
+
+	flush_tlb_mm(mm);
+	up_read(&mm->mmap_sem);
+	mmput(mm);
+out:
+	put_task_struct(task);
+	return count;
+
+out_err:
+	return -EINVAL;
+}
+
+const struct file_operations proc_reclaim_operations = {
+	.write		= reclaim_write,
+	.llseek		= noop_llseek,
+};
+#endif
 
 #ifdef CONFIG_NUMA
 

@@ -54,12 +54,6 @@ jobs:
           tar -xzf clang-r383902.tar.gz -C clang-bin
           rm clang-r383902.tar.gz
 
-          cd ..
-          mkdir -p compiler/ccache
-          cd compiler/ccache
-          ln -sf "$(which ccache)" clang
-          ln -sf "$(which ccache)" clang++
-
       - name: Handle Dependencies
         run: |
           mv temp_modules/vendor ./vendor
@@ -68,7 +62,7 @@ jobs:
 
       - name: Compile Kernel
         run: |
-          export PATH="$(pwd)/compiler/ccache:$(pwd)/compiler/clang-bin/bin:$PATH"
+          export PATH="$(pwd)/compiler/clang-bin/bin:$PATH"
           export CROSS_COMPILE="aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="arm-linux-androideabi-"
           export CLANG_TRIPLE="aarch64-linux-gnu-"
@@ -76,8 +70,8 @@ jobs:
           export ARCH="arm64"
           export SUBARCH="arm64"
           cd kernel/msm-5.4
-          make O=out CC="clang" LLVM=1 sm7325_defconfig
-          make O=out CC="clang" LLVM=1 -j$(nproc)
+          make O=out CC="ccache clang" LLVM=1 LLVM_IAS=1 sm7325_defconfig
+          make O=out CC="ccache clang" LLVM=1 LLVM_IAS=1 -j$(nproc)
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v6

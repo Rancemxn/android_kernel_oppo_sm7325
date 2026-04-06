@@ -1,0 +1,85 @@
+name: Build Kernel
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile Kernel
+    runs-on: ubuntu-24.04
+    
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      - name: Configure Fast APT Mirror
+        uses: vegardit/fast-apt-mirror.sh@v1
+        
+      - name: Make Build Environment
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget automake flex lzop bison gperf build-essential zip curl zlib1g-dev libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 ccache git-lfs gnupg imagemagick libelf-dev libncurses5-dev libsdl1.2-dev gpart fuse2fs e2fsck-static icu-doc rsync adb fastboot libstdc++6 python-is-python3 gcc-aarch64-linux-gnu
+          mkdir -p $CCACHE_DIR
+          ccache -M 5G
+          mkdir -p kernel
+
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v6
+        with:
+          repository: Rancemxn/android_kernel_oppo_sm7325
+          path: kernel/msm-5.4
+          fetch-depth: 1
+
+      - name: Checkout Modules Source
+        uses: actions/checkout@v6
+        with:
+          repository: oppo-source/android_kernel_modules_and_devicetree_oppo_sm7325
+          path: temp_modules
+          ref: oppo/sm7325_v_15.0.0_reno10
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache
+
+      - name: Prepare Compiler
+        run: |
+          mkdir -p compiler
+          cd compiler
+          
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/llvm-r383902b/clang-r383902.tar.gz" -o clang-r383902.tar.gz --connect-timeout 30 --retry 5 --retry-delay 5
+          mkdir -p clang
+          tar -xzf clang-r383902.tar.gz -C clang
+          rm clang-r383902.tar.gz
+
+          cd ..
+          mkdir -p compiler/ccache
+          cd compiler/ccache
+          ln -sf "$(which ccache)" clang
+          ln -sf "$(which ccache)" clang++
+
+      - name: Handle Dependencies
+        run: |
+          mv temp_modules/vendor ./vendor
+          rm -rf temp_modules
+
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 12
+
+      - name: Compile Kernel
+        run: |
+          export PATH="$(pwd)/compiler/ccache:$(pwd)/compiler/clang/bin:$PATH"
+          cd kernel/msm-5.4
+          make ARCH="arm64" O=out LLVM=1 sm7325_defconfig
+          make ARCH="arm64" O=out LLVM=1 -j$(nproc)
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: OPPO_K10x_Kernel_Image
+          path: kernel/msm-5.4/out/arch/arm64/boot/Image

@@ -10,9 +10,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Free Runner Space
-        uses: justinthelaw/maximize-github-runner-space@v0.9.0
-      
       - name: Configure Fast APT Mirror
         uses: vegardit/fast-apt-mirror.sh@v1
         

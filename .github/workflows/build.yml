@@ -62,19 +62,19 @@ jobs:
           cd kernel/msm-5.4
           
           echo "Checking dependencies for clang:"
-          ldd "$CLANG_BIN_PATH/clang"
+          ldd "clang"
           
           
           echo "Checking dependencies for llvm-nm:"
-          ldd "$CLANG_BIN_PATH/llvm-nm"
+          ldd "llvm-nm"
           
           
           echo "Running clang --version:"
-          "$CLANG_BIN_PATH/clang" --version
+          "clang" --version
           
           
           echo "Running llvm-nm --version:"
-          "$CLANG_BIN_PATH/llvm-nm" --version
+          "llvm-nm" --version
 
           make O=out CC="clang" LLVM=1 sm7325_defconfig
           make O=out CC="clang" LLVM=1 -j$(nproc)

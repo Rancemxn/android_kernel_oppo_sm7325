@@ -63,8 +63,8 @@ jobs:
           export ARCH="arm64"
           export SUBARCH="arm64"
           cd kernel/msm-5.4
-          make O=out CC="clang" LLVM=1 sm7325_defconfig
-          make O=out CC="clang" LLVM=1 -j$(nproc)
+          make O=out CC="clang" LLVM=1 V=1 sm7325_defconfig
+          make O=out CC="clang" LLVM=1 V=1 -j$(nproc) 
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v6

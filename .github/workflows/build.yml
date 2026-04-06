@@ -67,11 +67,6 @@ jobs:
           mv temp_modules/device ./device
           rm -rf temp_modules
 
-      - name: Set Swap Space
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 12
-
       - name: Compile Kernel
         run: |
           export PATH="$(pwd)/compiler/ccache:$(pwd)/compiler/clang/bin:$PATH"

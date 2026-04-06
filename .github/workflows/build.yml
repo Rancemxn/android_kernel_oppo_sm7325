@@ -63,8 +63,17 @@ jobs:
           export ARCH="arm64"
           export SUBARCH="arm64"
           cd kernel/msm-5.4
-          make O=out CC="clang" LLVM=1 V=1 sm7325_defconfig
-          make O=out CC="clang" LLVM=1 V=1 -j$(nproc) || (dmesg | tail -n 100 && exit 1)
+          make O=out CC="clang" LLVM=1 sm7325_defconfig
+          (while true; do 
+            echo "--- REAL-TIME STATS ---"
+            free -h | grep "Mem:"
+            sudo dmesg | tail -n 5 | grep -i "out of memory" || true
+            sleep 5
+          done) & 
+          
+          MONITOR_PID=$!
+          make O=out CC="clang" LLVM=1 -j$(nproc)
+          kill $MONITOR_PID
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v6

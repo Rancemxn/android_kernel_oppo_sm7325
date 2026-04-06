@@ -75,9 +75,15 @@ jobs:
       - name: Compile Kernel
         run: |
           export PATH="$(pwd)/compiler/ccache:$(pwd)/compiler/clang/bin:$PATH"
+          export CROSS_COMPILE="aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="arm-linux-androideabi-"
+          export CLANG_TRIPLE="aarch64-linux-gnu-"
+          export CLANG_PATH="$(pwd)/compiler/clang/bin"
+          export ARCH="arm64"
+          export SUBARCH="arm64"
           cd kernel/msm-5.4
-          make ARCH="arm64" O=out LLVM=1 sm7325_defconfig
-          make ARCH="arm64" O=out LLVM=1 -j$(nproc)
+          make O=out LLVM=1 sm7325_defconfig
+          make O=out LLVM=1 -j$(nproc)
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v6

@@ -60,22 +60,6 @@ jobs:
           export ARCH="arm64"
           export SUBARCH="arm64"
           cd kernel/msm-5.4
-          
-          echo "Checking dependencies for clang:"
-          ldd $CLANG_PATH/clang
-          
-          
-          echo "Checking dependencies for llvm-nm:"
-          ldd $CLANG_PATH/llvm-nm
-          
-          
-          echo "Running clang --version:"
-          clang --version
-          
-          
-          echo "Running llvm-nm --version:"
-          llvm-nm --version
-
           make O=out CC="clang" LLVM=1 sm7325_defconfig
           make O=out CC="clang" LLVM=1 -j$(nproc)
 

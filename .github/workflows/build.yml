@@ -62,11 +62,11 @@ jobs:
           cd kernel/msm-5.4
           
           echo "Checking dependencies for clang:"
-          ldd clang
+          ldd $CLANG_PATH/clang
           
           
           echo "Checking dependencies for llvm-nm:"
-          ldd llvm-nm
+          ldd $CLANG_PATH/llvm-nm
           
           
           echo "Running clang --version:"
